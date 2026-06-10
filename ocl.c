@@ -644,8 +644,13 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
 
     switch(clState->chosen_kernel) {
         case(KL_NEOSCRYPT):
-            strcpy(filename, NEOSCRYPT_KERNNAME".cl");
-            strcpy(binaryfilename, NEOSCRYPT_KERNNAME);
+            if (opt_neoscrypt_xaya) {
+                strcpy(filename, "neoscrypt-xaya.cl");
+                strcpy(binaryfilename, "neoscrypt-xaya");
+            } else {
+                strcpy(filename, NEOSCRYPT_KERNNAME".cl");
+                strcpy(binaryfilename, NEOSCRYPT_KERNNAME);
+            }
             /* NeoScrypt only supports vector 1 */
             cgpu->vwidth = 1;
             /* Limit work group size due to insufficient local memory */

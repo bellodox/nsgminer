@@ -1761,7 +1761,7 @@ static bool opencl_thread_prepare(struct thr_info *thr)
         switch(clStates[i]->chosen_kernel) {
 #ifdef USE_NEOSCRYPT
             case(KL_NEOSCRYPT):
-                cgpu->kname = "neoscrypt";
+                cgpu->kname = opt_neoscrypt_xaya ? "neoscrypt-xaya" : "neoscrypt";
                 break;
             case(KL_NEOSCRYPT_VLIW):
                 cgpu->kname = "neoscrypt_vliw";
