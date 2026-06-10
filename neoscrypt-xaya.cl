@@ -1,9 +1,3 @@
-/* NeoScrypt-Xaya OpenCL kernel for nsgminer.
- * Uses nsgminer single-kernel ABI: search(input, output, globalcache, target).
- * Xaya-specific work is host-side 80-byte header ordering; this kernel implements
- * the canonical N=128,r=2,p=1 FastKDF-BLAKE2s NeoScrypt core.
- */
-
 /*
  * Copyright (c) 2014-2025 John Doering <ghostlander@phoenixcoin.org>
  * All rights reserved.
@@ -33,7 +27,7 @@
 
 /* NeoScrypt(128, 2, 1) with Salsa20/20 and ChaCha20/20
  * Optimised for modern AMD and NVIDIA GPU architectures
- * v8c, 16-Feb-2025 */
+ * v8c, 16-Feb-2025 - nsgminer NeoScrypt-Xaya ABI */
 
 
 #if (cl_amd_media_ops)
