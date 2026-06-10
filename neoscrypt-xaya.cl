@@ -1,15 +1,7 @@
-/*
- * NeoScrypt-Xaya OpenCL kernel for nsgminer.
- *
- * Xaya uses the standard NeoScrypt profile used by this codebase
- * (0x80000620: NeoScrypt(128,2,1), FastKDF-BLAKE2s) over an 80-byte
- * little-endian block header. The Xaya-specific behavior is therefore
- * in host-side work/header byte-order handling; the GPU hash core and
- * nsgminer kernel ABI remain the standard monolithic `search` kernel.
- *
- * Do not replace this with the four-stage ccminer/sgminer kernel without
- * also rewriting driver-opencl.c to allocate its staging buffers and launch
- * neoscrypt_gpu_hash_start/salsa1/chacha1/ending in sequence.
+/* NeoScrypt-Xaya OpenCL kernel for nsgminer.
+ * Uses nsgminer single-kernel ABI: search(input, output, globalcache, target).
+ * Xaya-specific work is host-side 80-byte header ordering; this kernel implements
+ * the canonical N=128,r=2,p=1 FastKDF-BLAKE2s NeoScrypt core.
  */
 
 /*
