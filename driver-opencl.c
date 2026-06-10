@@ -908,7 +908,7 @@ void manage_gpu(void)
     int min_intensity = -127, max_intensity = 127;
 
 #ifdef USE_NEOSCRYPT
-    if(opt_neoscrypt || opt_neoscrypt_xaya) {
+    if(opt_neoscrypt) {
         min_intensity = MIN_NEOSCRYPT_INTENSITY;
         max_intensity = MAX_NEOSCRYPT_INTENSITY;
     } else
@@ -1103,7 +1103,7 @@ retry:
 		free(intvar);
 
 #ifdef USE_NEOSCRYPT
-    if(opt_neoscrypt || opt_neoscrypt_xaya) {
+    if(opt_neoscrypt) {
         if((intensity < MIN_NEOSCRYPT_INTENSITY) || (intensity > gpus[selected].max_intensity)) {
             wlogprint("Invalid selection\n");
             goto retry;
@@ -1592,7 +1592,7 @@ static void opencl_detect()
 	if (!nDevs)
 		return;
 
-    if(opt_neoscrypt || opt_neoscrypt_xaya || opt_scrypt) {
+    if(opt_neoscrypt || opt_scrypt) {
         if(opt_g_threads == -1)
 	  opt_g_threads = 1;
     }
@@ -1761,7 +1761,7 @@ static bool opencl_thread_prepare(struct thr_info *thr)
         switch(clStates[i]->chosen_kernel) {
 #ifdef USE_NEOSCRYPT
             case(KL_NEOSCRYPT):
-                cgpu->kname = opt_neoscrypt_xaya ? "neoscrypt-xaya" : "neoscrypt";
+                cgpu->kname = "neoscrypt";
                 break;
             case(KL_NEOSCRYPT_VLIW):
                 cgpu->kname = "neoscrypt_vliw";
@@ -1909,7 +1909,7 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
     int min_intensity = -127, max_intensity = 127;
 
 #ifdef USE_NEOSCRYPT
-    if(opt_neoscrypt || opt_neoscrypt_xaya) {
+    if(opt_neoscrypt) {
         min_intensity = MIN_NEOSCRYPT_INTENSITY;
         max_intensity = MAX_NEOSCRYPT_INTENSITY;
     } else
@@ -1941,7 +1941,7 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
               --gpu->intensity;
         } else {
             if(gpu_us < dynamic_us / 2) {
-                if(gpu->intensity < ((opt_neoscrypt || opt_neoscrypt_xaya) ? gpu->max_intensity : max_intensity))
+                if(gpu->intensity < (opt_neoscrypt ? gpu->max_intensity : max_intensity))
                   ++gpu->intensity;
             }
         }

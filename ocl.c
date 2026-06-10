@@ -645,9 +645,9 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
     switch(clState->chosen_kernel) {
         case(KL_NEOSCRYPT):
             if(opt_neoscrypt_xaya) {
+                applog(LOG_WARNING, "XAYA-KERNEL-PROOF: loading neoscrypt-xaya.cl");
                 strcpy(filename, "neoscrypt-xaya.cl");
                 strcpy(binaryfilename, "neoscrypt-xaya");
-                applog(LOG_NOTICE, "Loading NeoScrypt-Xaya OpenCL kernel: %s", filename);
             } else {
                 strcpy(filename, NEOSCRYPT_KERNNAME".cl");
                 strcpy(binaryfilename, NEOSCRYPT_KERNNAME);
@@ -805,7 +805,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
 		strcat(binaryfilename, "g");
 
 #ifdef USE_NEOSCRYPT
-    if(opt_neoscrypt || opt_neoscrypt_xaya) {
+    if(opt_neoscrypt) {
         /* Nothing here */
     } else
 #endif

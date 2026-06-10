@@ -2769,13 +2769,7 @@ static char *submit_upstream_work_request(struct work *work)
     if(work->tmpl) {
 
         json_t *req;
-        if(opt_neoscrypt_xaya) {
-            req = blkmk_submit_jansson(work->tmpl, work->data, work->dataid,
-              le32toh(*((uint32_t *) &work->data[76])));
-            s = json_dumps(req, 0);
-            json_decref(req);
-            sd = bin2hex(work->data, 80);
-        } else if(opt_neoscrypt) {
+        if(opt_neoscrypt || opt_neoscrypt_xaya) {
             req = blkmk_submit_jansson(work->tmpl, work->data, work->dataid,
               be32toh(*((uint32_t *) &work->data[76])));
             s = json_dumps(req, 0);
@@ -3003,7 +2997,7 @@ static double target_diff(const uchar *target) {
     double dfp64 = 0.0;
 
     /* Little endian straight ordered target */
-    if(opt_neoscrypt || opt_neoscrypt_xaya || opt_scrypt) {
+    if(opt_neoscrypt || opt_scrypt) {
         dfp64  = le64toh(pt64[3]) * 6277101735386680763835789423207666416102355444464034512896.0;
         dfp64 += le64toh(pt64[2]) * 340282366920938463463374607431768211456.0;
         dfp64 += le64toh(pt64[1]) * 18446744073709551616.0;
@@ -3028,7 +3022,7 @@ static ullong target_diff_int(const uchar *target) {
 
     /* Little endian straight ordered target;
      * 2 most significant bytes discarded are supposed to be zero */
-    if(opt_neoscrypt || opt_neoscrypt_xaya || opt_scrypt) {
+    if(opt_neoscrypt || opt_scrypt) {
         d64 = le64toh(*((ullong *) (target + 22)));
         return(BASE_TARGET / (d64 ? d64 : 1));
      }
@@ -3549,20 +3543,6 @@ static void roll_work(struct work *work) {
             *work_ntime = htobe32(ntime);
         }
 
-        if(work->ntime) {
-            char ntime_hex[9];
-            uint32_t submit_ntime;
-
-            if(opt_neoscrypt || opt_neoscrypt_xaya)
-              submit_ntime = htole32(ntime);
-            else
-              submit_ntime = htobe32(ntime);
-
-            _bin2hex(ntime_hex, (uchar *) &submit_ntime, 4);
-            free(work->ntime);
-            work->ntime = strdup(ntime_hex);
-        }
-
         applog(LOG_DEBUG, "Successfully rolled time header in work");
     }
 
@@ -3860,9 +3840,7 @@ static struct submit_work_state *begin_submission(struct work *work)
     uchar target[32];
     uint nbits;
 
-    if(opt_neoscrypt_xaya)
-      nbits = be32toh(*((uint *) (work->data + 72)));
-    else if(opt_neoscrypt)
+    if(opt_neoscrypt || opt_neoscrypt_xaya)
       nbits = le32toh(*((uint *) (work->data + 72)));
     else
       nbits = be32toh(*((uint *) (work->data + 72)));
@@ -4496,7 +4474,7 @@ static void set_curblock(uchar *data, char *hexstr,
     uint hash[8];
     uint i;
 
-    if(opt_neoscrypt || opt_neoscrypt_xaya) {
+    if(opt_neoscrypt) {
         for(i = 0; i < 8; i++)
           hash[i] = le32toh(((uint *) data)[i + 1]);
     } else {
@@ -4553,9 +4531,7 @@ static void set_block_diff(const struct work *work) {
     uint nbits;
     ullong d64;
 
-    if(opt_neoscrypt_xaya)
-      nbits = be32toh(*((uint *) (work->data + 72)));
-    else if(opt_neoscrypt)
+    if(opt_neoscrypt || opt_neoscrypt_xaya)
       nbits = le32toh(*((uint *) (work->data + 72)));
     else
       nbits = be32toh(*((uint *) (work->data + 72)));
@@ -6587,50 +6563,32 @@ static void gen_stratum_work(struct pool *pool, struct work *work) {
 
     /* Assemble the block header */
     if(opt_neoscrypt_xaya) {
-        /*
-         * Xaya follows ccminer's ALGO_XAYA stratum layout: decode the
-         * version, previous hash, time, bits and merkle words as little
-         * endian.  The old branch reused the normal NeoScrypt path here,
-         * which byte-swapped version/prevhash/time/bits and produces
-         * locally valid but pool-invalid shares.
-         */
+        /* Xaya uses the 80-byte header exactly as ccminer ALGO_XAYA builds it. */
         hex2bin((uchar *) &t, (char *) pool->swork.bbversion, 4);
         data[0] = le32toh(t);
-
         hex2bin((uchar *) temp_bin, (char *) pool->swork.prev_hash, 32);
         for(i = 0; i < 8; i++)
           data[i + 1] = le32toh(((uint *) temp_bin)[i]);
-
         for(i = 0; i < 8; i++)
-          data[i + 9] = le32toh(((uint *) merkle_root)[i]);
-
+          data[i + 9] = be32toh(((uint *) merkle_root)[i]);
         hex2bin((uchar *) &t, (char *) pool->swork.ntime, 4);
         data[17] = le32toh(t);
-
         hex2bin((uchar *) &t, (char *) pool->swork.nbit, 4);
         data[18] = le32toh(t);
-
         memset(&data[19], 0x00, 52);
-        data[20] = 0x80000000;
-        data[31] = 0x00000280;
     } else if(opt_neoscrypt) {
-        /* Version */
+        /* Legacy NeoScrypt path. */
         hex2bin((uchar *) &t, (char *) pool->swork.bbversion, 4);
         data[0] = be32toh(t);
-        /* Previous block hash */
         hex2bin((uchar *) temp_bin, (char *) pool->swork.prev_hash, 32);
         for(i = 0; i < 8; i++)
           data[i + 1] = be32toh(((uint *) temp_bin)[i]);
-        /* Merkle root */
         for(i = 0; i < 8; i++)
           data[i + 9] = le32toh(((uint *) merkle_root)[i]);
-        /* Time */
         hex2bin((uchar *) &t, (char *) pool->swork.ntime, 4);
         data[17] = be32toh(t);
-        /* Difficulty */
         hex2bin((uchar *) &t, (char *) pool->swork.nbit, 4);
         data[18] = be32toh(t);
-        /* Erase the remaining part */
         memset(&data[19], 0x00, 52);
     } else {
         /* Version */
@@ -6766,7 +6724,10 @@ enum test_nonce2_result _test_nonce2(struct work *work, uint32_t nonce,
 
         neoscrypt((uchar *) work->data, (uchar *) work->hash, 0x80000620);
 
-        if(!fulltest_le((uint *) work->hash, (uint *) work->target))
+        if(work->hash[31])
+          return(TNR_BAD);
+
+        if(((ullong *) work->hash)[3] > ((ullong *) work->target)[3])
           return(TNR_HIGH);
 
         return(TNR_GOOD);

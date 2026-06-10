@@ -756,8 +756,8 @@ bool fulltest(const unsigned char *hash, const unsigned char *target)
 
 /* Little endian hash vs. target test for NeoScrypt */
 int fulltest_le(const uint *hash, const uint *target) {
-    int i;
-    int rc = 1;
+    uint i;
+    int rc;
 
     for(i = 7; i >= 0; i--) {
         if(hash[i] > target[i]) {

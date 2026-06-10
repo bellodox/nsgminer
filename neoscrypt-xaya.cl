@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2025 John Doering <ghostlander@phoenixcoin.org>
+ * Copyright (c) 2020 fancyIX
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,943 +24,870 @@
  * SUCH DAMAGE.
  */
 
+// kernel code from Nanashi Meiyo-Meijin 1.7.6-r10 (July 2016)
 
-/* NeoScrypt(128, 2, 1) with Salsa20/20 and ChaCha20/20
- * Optimised for modern AMD and NVIDIA GPU architectures
- * v8c, 16-Feb-2025 - nsgminer NeoScrypt-Xaya ABI */
+#pragma OPENCL EXTENSION cl_amd_media_ops : enable
 
+/*
+__device__ uint2x4* W;
+__device__ uint2x4* Tr;
+__device__ uint2x4* Tr2;
+__device__ uint2x4* Input;
 
-#if (cl_amd_media_ops)
-#define AMD 1
-#elif (cl_nv_pragma_unroll)
-#define NVIDIA 1
-#endif
+__constant__ uint c_data[64];
+__constant__ uint c_target[2];
+__constant__ uint key_init[16];
+__constant__ uint input_init[16];
+*/
 
-#if (AMD)
-#define SALSA_SCALAR 0
-#define CHACHA_SCALAR 0
-#define BLAKE2S_SCALAR 0
-#define FASTKDF_SCALAR 0
-#define SALSA_UNROLL_LEVEL 4
-#define CHACHA_UNROLL_LEVEL 4
-#define FASTKDF_COMPACT 0
-#define BLAKE2S_COMPACT 0
-#elif (NVIDIA)
-#define SALSA_SCALAR 0
-#define CHACHA_SCALAR 0
-#define BLAKE2S_SCALAR 0
-#define FASTKDF_SCALAR 0
-#define SALSA_UNROLL_LEVEL 1
-#define CHACHA_UNROLL_LEVEL 1
-#define FASTKDF_COMPACT 1
-#define BLAKE2S_COMPACT 1
-#else
-#define SALSA_SCALAR 1
-#define CHACHA_SCALAR 1
-#define BLAKE2S_SCALAR 1
-#define FASTKDF_SCALAR 1
-#define SALSA_UNROLL_LEVEL 2
-#define CHACHA_UNROLL_LEVEL 2
-#define FASTKDF_COMPACT 0
-#define BLAKE2S_COMPACT 0
-#endif
+#define BLOCK_SIZE         64U
+#define BLAKE2S_BLOCK_SIZE 64U
+#define BLAKE2S_OUT_SIZE   32U
 
-
-#if (AMD)
-/* memcpy() of 4-byte aligned memory */
-void neoscrypt_copy4(void *restrict dstp, const void *restrict srcp,
-  uint len) {
-    uint *dst = (uint *) dstp;
-    uint *src = (uint *) srcp;
-    uint i;
-
-    len >>= 2;
-
-    for(i = 0; i < len; i++)
-      dst[i] = src[i];
-}
-#else
-#define amd_bitalign(src0, src1, src2) ((uint)(((((ulong)src0) << 32) | (ulong)src1) >> (src2 & 0x1F)))
-#endif
-
-/* 32-byte memcpy() of possibly unaligned private memory to 32-byte aligned
- * private memory */
-void neoscrypt_copy32_upap(uint8 *restrict dstp, const void *restrict srcp,
-  uint offset) {
-    uint *dst = (uint *) dstp;
-    uint *src = (uint *) srcp;
-
-    offset = amd_bitalign(offset, offset, 29U);
-
-    dst[0] = amd_bitalign(src[1], src[0], offset);
-    dst[1] = amd_bitalign(src[2], src[1], offset);
-    dst[2] = amd_bitalign(src[3], src[2], offset);
-    dst[3] = amd_bitalign(src[4], src[3], offset);
-    dst[4] = amd_bitalign(src[5], src[4], offset);
-    dst[5] = amd_bitalign(src[6], src[5], offset);
-    dst[6] = amd_bitalign(src[7], src[6], offset);
-    dst[7] = amd_bitalign(src[8], src[7], offset);
-}
-
-/* 64-byte memcpy() of possibly unaligned local memory to 32-byte aligned
- * private memory */
-void neoscrypt_copy64_ulap(uint8 *restrict dstp, const __local void *restrict srcp,
-  uint offset) {
-    uint *dst = (uint *) dstp;
-    __local uint *src = (__local uint *) srcp;
-
-    offset = amd_bitalign(offset, offset, 29U);
-
-    dst[0]  = amd_bitalign(src[1],  src[0], offset);
-    dst[1]  = amd_bitalign(src[2],  src[1], offset);
-    dst[2]  = amd_bitalign(src[3],  src[2], offset);
-    dst[3]  = amd_bitalign(src[4],  src[3], offset);
-    dst[4]  = amd_bitalign(src[5],  src[4], offset);
-    dst[5]  = amd_bitalign(src[6],  src[5], offset);
-    dst[6]  = amd_bitalign(src[7],  src[6], offset);
-    dst[7]  = amd_bitalign(src[8],  src[7], offset);
-    dst[8]  = amd_bitalign(src[9],  src[8], offset);
-    dst[9]  = amd_bitalign(src[10], src[9], offset);
-    dst[10] = amd_bitalign(src[11], src[10], offset);
-    dst[11] = amd_bitalign(src[12], src[11], offset);
-    dst[12] = amd_bitalign(src[13], src[12], offset);
-    dst[13] = amd_bitalign(src[14], src[13], offset);
-    dst[14] = amd_bitalign(src[15], src[14], offset);
-    dst[15] = amd_bitalign(src[16], src[15], offset);
-}
-
-/* 32-byte memcpy() of possibly unaligned private memory to 32-byte aligned
- * private memory (iterated) */
-void neoscrypt_copy32_upap_it(uint8 *restrict dstp, const void *restrict srcp,
-  uint offset, uint it) {
-    uint *dst = (uint *) dstp;
-    uint *src = (uint *) srcp;
-    uint i;
-
-    offset = amd_bitalign(offset, offset, 29U);
-
-    it = amd_bitalign(it, it, 29U);
-
-    for(i = 0; i < it; i += 8) {
-        dst[i]     = amd_bitalign(src[i + 1], src[i],     offset);
-        dst[i + 1] = amd_bitalign(src[i + 2], src[i + 1], offset);
-        dst[i + 2] = amd_bitalign(src[i + 3], src[i + 2], offset);
-        dst[i + 3] = amd_bitalign(src[i + 4], src[i + 3], offset);
-        dst[i + 4] = amd_bitalign(src[i + 5], src[i + 4], offset);
-        dst[i + 5] = amd_bitalign(src[i + 6], src[i + 5], offset);
-        dst[i + 6] = amd_bitalign(src[i + 7], src[i + 6], offset);
-        dst[i + 7] = amd_bitalign(src[i + 8], src[i + 7], offset);
-    }
-}
-
-/* 4-byte XOR of possibly unaligned private memory to 4-byte aligned
- * private memory */
-void neoscrypt_xor4_upap(uint *restrict dst, const uint *restrict src, uint offset) {
-    offset = amd_bitalign(offset, offset, 29U);
-    dst[0] ^= amd_bitalign(src[1], src[0], offset);
-}
-
-/* 32-byte XOR of 32-byte aligned private memory to possibly unaligned
- * private memory */
-void neoscrypt_xor32_apup(void *restrict dstp, const uint8 *restrict srcp,
-  uint offset) {
-    uint *dst = (uint *) dstp;
-    uint *src = (uint *) srcp;
-    uint roffset;
-
-    /* OpenCL cannot shift uint by 32 to zero value */
-
-#if (AMD)
-    if(offset) {
-        /* 75% chance */
-        roffset = 32U - amd_bitalign(offset, offset, 29U);
-        dst[0] ^= amd_bitalign(src[0], 0U,     roffset);
-        dst[1] ^= amd_bitalign(src[1], src[0], roffset);
-        dst[2] ^= amd_bitalign(src[2], src[1], roffset);
-        dst[3] ^= amd_bitalign(src[3], src[2], roffset);
-        dst[4] ^= amd_bitalign(src[4], src[3], roffset);
-        dst[5] ^= amd_bitalign(src[5], src[4], roffset);
-        dst[6] ^= amd_bitalign(src[6], src[5], roffset);
-        dst[7] ^= amd_bitalign(src[7], src[6], roffset);
-        dst[8] ^= amd_bitalign(0U,     src[7], roffset);
-    } else {
-        /* 25% chance */
-        dst[0] ^= src[0];
-        dst[1] ^= src[1];
-        dst[2] ^= src[2];
-        dst[3] ^= src[3];
-        dst[4] ^= src[4];
-        dst[5] ^= src[5];
-        dst[6] ^= src[6];
-        dst[7] ^= src[7];
-    }
-#else
-    offset <<= 3;
-    roffset = 32U - offset;
-
-    dst[0] ^= (src[0] << offset);
-    dst[1] ^= ((src[1] << offset) | (uint)((ulong)src[0] >> roffset));
-    dst[2] ^= ((src[2] << offset) | (uint)((ulong)src[1] >> roffset));
-    dst[3] ^= ((src[3] << offset) | (uint)((ulong)src[2] >> roffset));
-    dst[4] ^= ((src[4] << offset) | (uint)((ulong)src[3] >> roffset));
-    dst[5] ^= ((src[5] << offset) | (uint)((ulong)src[4] >> roffset));
-    dst[6] ^= ((src[6] << offset) | (uint)((ulong)src[5] >> roffset));
-    dst[7] ^= ((src[7] << offset) | (uint)((ulong)src[6] >> roffset));
-    dst[8] ^= (uint)((ulong)src[7] >> roffset);
-#endif
-}
-
-void neoscrypt_copy128_pl(uint16 __local *restrict dst, const uint16 *restrict src) {
-    dst[0] = src[0];
-    dst[1] = src[1];
-}
-
-void neoscrypt_copy256(uint16 *restrict dst, const uint16 *restrict src) {
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
-    dst[3] = src[3];
-}
-
-void neoscrypt_xor256(uint16 *restrict dst, const uint16 *restrict src) {
-    dst[0] ^= src[0];
-    dst[1] ^= src[1];
-    dst[2] ^= src[2];
-    dst[3] ^= src[3];
-}
-
-/* 64-byte XOR based block swapper */
-void neoscrypt_swap64(uint16 *restrict blkA, uint16 *restrict blkB) {
-    blkA[0] ^= blkB[0];
-    blkB[0] ^= blkA[0];
-    blkA[0] ^= blkB[0];
-}
-
-/* 256-byte XOR based block swapper */
-void neoscrypt_swap256(uint16 *restrict blkA, uint16 *restrict blkB) {
-    blkA[0] ^= blkB[0];
-    blkB[0] ^= blkA[0];
-    blkA[0] ^= blkB[0];
-    blkA[1] ^= blkB[1];
-    blkB[1] ^= blkA[1];
-    blkA[1] ^= blkB[1];
-    blkA[2] ^= blkB[2];
-    blkB[2] ^= blkA[2];
-    blkA[2] ^= blkB[2];
-    blkA[3] ^= blkB[3];
-    blkB[3] ^= blkA[3];
-    blkA[3] ^= blkB[3];
-}
-
-
-/* BLAKE2s */
-
-/* Initialisation vector */
-static const __constant uint8 blake2s_IV4[1] = {
-    (uint8)(0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
-            0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19)
+__constant uint8 BLAKE2S_IV_Vec = {
+	0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+	0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
 };
 
-static const __constant uint blake2s_sigma[10][16] = {
-    {  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15 } ,
-    { 14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3 } ,
-    { 11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4 } ,
-    {  7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8 } ,
-    {  9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13 } ,
-    {  2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9 } ,
-    { 12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11 } ,
-    { 13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10 } ,
-    {  6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5 } ,
-    { 10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13 , 0 } ,
+__constant uint BLAKE2S_SIGMA[10][16] = {
+	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+	{ 14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3 },
+	{ 11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4 },
+	{ 7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8 },
+	{ 9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13 },
+	{ 2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9 },
+	{ 12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11 },
+	{ 13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10 },
+	{ 6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5 },
+	{ 10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0 },
 };
 
-#define G(x, y, a, b, c, d) \
-    a += b + m[blake2s_sigma[x][y]]; \
-    d = rotate(d ^ a, 16U); \
-    c += d; \
-    b = rotate(b ^ c, 20U); \
-    a += b + m[blake2s_sigma[x][y + 1]]; \
-    d = rotate(d ^ a, 24U); \
-    c += d; \
-    b = rotate(b ^ c, 25U);
+#define rotateR(x, n) rotate((uint)(x), (uint)(32 - (n)))
 
-#define G1(x, a, b, c, d) \
-    a += b + (uint4)(m[blake2s_sigma[x][0]], m[blake2s_sigma[x][2]], m[blake2s_sigma[x][4]], m[blake2s_sigma[x][6]]); \
-    d = rotate(d ^ a, (uint4)(16, 16, 16, 16)); \
-    c += d; \
-    b = rotate(b ^ c, (uint4)(20, 20, 20, 20)); \
-    a += b + (uint4)(m[blake2s_sigma[x][1]], m[blake2s_sigma[x][3]], m[blake2s_sigma[x][5]], m[blake2s_sigma[x][7]]); \
-    d = rotate(d ^ a, (uint4)(24, 24, 24, 24)); \
-    c += d; \
-    b = rotate(b ^ c, (uint4)(25, 25, 25, 25));
+#define BLAKE_G(idx0, idx1, a, b, c, d, key) { \
+	idx = BLAKE2S_SIGMA[idx0][idx1]; a += key[idx]; \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	idx = BLAKE2S_SIGMA[idx0][idx1+1]; a += key[idx]; \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
+} 
 
-#define G2(x, a, b, c, d) \
-    a += b + (uint4)(m[blake2s_sigma[x][8]], m[blake2s_sigma[x][10]], m[blake2s_sigma[x][12]], m[blake2s_sigma[x][14]]); \
-    d = rotate(d ^ a, (uint4)(16, 16, 16, 16)); \
-    c += d; \
-    b = rotate(b ^ c, (uint4)(20, 20, 20, 20)); \
-    a += b + (uint4)(m[blake2s_sigma[x][9]], m[blake2s_sigma[x][11]], m[blake2s_sigma[x][13]], m[blake2s_sigma[x][15]]); \
-    d = rotate(d ^ a, (uint4)(24, 24, 24, 24)); \
-    c += d; \
-    b = rotate(b ^ c, (uint4)(25, 25, 25, 25));
-
-
-/* Salsa20/20 */
-
-#define SALSA_CORE_SCALAR(Y) \
-    Y.s4 ^= rotate(Y.s0 + Y.sc, 7U);  Y.s8 ^= rotate(Y.s4 + Y.s0, 9U);  \
-    Y.sc ^= rotate(Y.s8 + Y.s4, 13U); Y.s0 ^= rotate(Y.sc + Y.s8, 18U); \
-    Y.s9 ^= rotate(Y.s5 + Y.s1, 7U);  Y.sd ^= rotate(Y.s9 + Y.s5, 9U);  \
-    Y.s1 ^= rotate(Y.sd + Y.s9, 13U); Y.s5 ^= rotate(Y.s1 + Y.sd, 18U); \
-    Y.se ^= rotate(Y.sa + Y.s6, 7U);  Y.s2 ^= rotate(Y.se + Y.sa, 9U);  \
-    Y.s6 ^= rotate(Y.s2 + Y.se, 13U); Y.sa ^= rotate(Y.s6 + Y.s2, 18U); \
-    Y.s3 ^= rotate(Y.sf + Y.sb, 7U);  Y.s7 ^= rotate(Y.s3 + Y.sf, 9U);  \
-    Y.sb ^= rotate(Y.s7 + Y.s3, 13U); Y.sf ^= rotate(Y.sb + Y.s7, 18U); \
-    Y.s1 ^= rotate(Y.s0 + Y.s3, 7U);  Y.s2 ^= rotate(Y.s1 + Y.s0, 9U);  \
-    Y.s3 ^= rotate(Y.s2 + Y.s1, 13U); Y.s0 ^= rotate(Y.s3 + Y.s2, 18U); \
-    Y.s6 ^= rotate(Y.s5 + Y.s4, 7U);  Y.s7 ^= rotate(Y.s6 + Y.s5, 9U);  \
-    Y.s4 ^= rotate(Y.s7 + Y.s6, 13U); Y.s5 ^= rotate(Y.s4 + Y.s7, 18U); \
-    Y.sb ^= rotate(Y.sa + Y.s9, 7U);  Y.s8 ^= rotate(Y.sb + Y.sa, 9U);  \
-    Y.s9 ^= rotate(Y.s8 + Y.sb, 13U); Y.sa ^= rotate(Y.s9 + Y.s8, 18U); \
-    Y.sc ^= rotate(Y.sf + Y.se, 7U);  Y.sd ^= rotate(Y.sc + Y.sf, 9U);  \
-    Y.se ^= rotate(Y.sd + Y.sc, 13U); Y.sf ^= rotate(Y.se + Y.sd, 18U);
-
-#define SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3) \
-    Y0 ^= rotate(Y3 + Y2, (uint4)( 7,  7,  7,  7)); \
-    Y1 ^= rotate(Y0 + Y3, (uint4)( 9,  9,  9,  9)); \
-    Y2 ^= rotate(Y1 + Y0, (uint4)(13, 13, 13, 13)); \
-    Y3 ^= rotate(Y2 + Y1, (uint4)(18, 18, 18, 18)); \
-    Y2 ^= rotate(Y3.wxyz + Y0.zwxy, (uint4)( 7,  7,  7,  7)); \
-    Y1 ^= rotate(Y2.wxyz + Y3.zwxy, (uint4)( 9,  9,  9,  9)); \
-    Y0 ^= rotate(Y1.wxyz + Y2.zwxy, (uint4)(13, 13, 13, 13)); \
-    Y3 ^= rotate(Y0.wxyz + Y1.zwxy, (uint4)(18, 18, 18, 18));
-
-uint16 neoscrypt_salsa(uint16 X) {
-    uint i;
-
-#if (SALSA_SCALAR)
-
-    uint16 Y = X;
-
-#if (SALSA_UNROLL_LEVEL == 1)
-
-    for(i = 0; i < 10; i++) {
-        SALSA_CORE_SCALAR(Y);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 2)
-
-    for(i = 0; i < 5; i++) {
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 3)
-
-    for(i = 0; i < 4; i++) {
-        SALSA_CORE_SCALAR(Y);
-        if(i == 3) break;
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 4)
-
-    for(i = 0; i < 3; i++) {
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-        if(i == 2) break;
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-     }
-
-#else
-
-    for(i = 0; i < 2; i++) {
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-        SALSA_CORE_SCALAR(Y);
-    }
-
-#endif
-
-    return(X + Y);
-
-#else /* SALSA_VECTOR */
-
-    uint4 Y0 = (uint4)(X.s4, X.s9, X.se, X.s3);
-    uint4 Y1 = (uint4)(X.s8, X.sd, X.s2, X.s7);
-    uint4 Y2 = (uint4)(X.sc, X.s1, X.s6, X.sb);
-    uint4 Y3 = (uint4)(X.s0, X.s5, X.sa, X.sf);
-
-#if (SALSA_UNROLL_LEVEL == 1)
-
-    for(i = 0; i < 10; i++) {
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 2)
-
-    for(i = 0; i < 5; i++) {
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 3)
-
-    for(i = 0; i < 4; i++) {
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        if(i == 3) break;
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (SALSA_UNROLL_LEVEL == 4)
-
-    for(i = 0; i < 3; i++) {
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        if(i == 2) break;
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-     }
-
-#else
-
-    for(i = 0; i < 2; i++) {
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        SALSA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#endif
-
-    return(X + (uint16)(Y3.x, Y2.y, Y1.z, Y0.w, Y0.x, Y3.y, Y2.z, Y1.w,
-                        Y1.x, Y0.y, Y3.z, Y2.w, Y2.x, Y1.y, Y0.z, Y3.w));
-
-#endif
+#define BLAKE(a, b, c, d, key1,key2) { \
+	a += key1; \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	a += key2; \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
 }
 
-
-/* ChaCha20/20 */
-
-#define CHACHA_CORE_SCALAR(Y) \
-    Y.s0 += Y.s4; Y.sc = rotate(Y.sc ^ Y.s0, 16U); \
-    Y.s8 += Y.sc; Y.s4 = rotate(Y.s4 ^ Y.s8, 12U); \
-    Y.s0 += Y.s4; Y.sc = rotate(Y.sc ^ Y.s0, 8U);  \
-    Y.s8 += Y.sc; Y.s4 = rotate(Y.s4 ^ Y.s8, 7U);  \
-    Y.s1 += Y.s5; Y.sd = rotate(Y.sd ^ Y.s1, 16U); \
-    Y.s9 += Y.sd; Y.s5 = rotate(Y.s5 ^ Y.s9, 12U); \
-    Y.s1 += Y.s5; Y.sd = rotate(Y.sd ^ Y.s1, 8U);  \
-    Y.s9 += Y.sd; Y.s5 = rotate(Y.s5 ^ Y.s9, 7U);  \
-    Y.s2 += Y.s6; Y.se = rotate(Y.se ^ Y.s2, 16U); \
-    Y.sa += Y.se; Y.s6 = rotate(Y.s6 ^ Y.sa, 12U); \
-    Y.s2 += Y.s6; Y.se = rotate(Y.se ^ Y.s2, 8U);  \
-    Y.sa += Y.se; Y.s6 = rotate(Y.s6 ^ Y.sa, 7U);  \
-    Y.s3 += Y.s7; Y.sf = rotate(Y.sf ^ Y.s3, 16U); \
-    Y.sb += Y.sf; Y.s7 = rotate(Y.s7 ^ Y.sb, 12U); \
-    Y.s3 += Y.s7; Y.sf = rotate(Y.sf ^ Y.s3, 8U);  \
-    Y.sb += Y.sf; Y.s7 = rotate(Y.s7 ^ Y.sb, 7U);  \
-    Y.s0 += Y.s5; Y.sf = rotate(Y.sf ^ Y.s0, 16U); \
-    Y.sa += Y.sf; Y.s5 = rotate(Y.s5 ^ Y.sa, 12U); \
-    Y.s0 += Y.s5; Y.sf = rotate(Y.sf ^ Y.s0, 8U);  \
-    Y.sa += Y.sf; Y.s5 = rotate(Y.s5 ^ Y.sa, 7U);  \
-    Y.s1 += Y.s6; Y.sc = rotate(Y.sc ^ Y.s1, 16U); \
-    Y.sb += Y.sc; Y.s6 = rotate(Y.s6 ^ Y.sb, 12U); \
-    Y.s1 += Y.s6; Y.sc = rotate(Y.sc ^ Y.s1, 8U);  \
-    Y.sb += Y.sc; Y.s6 = rotate(Y.s6 ^ Y.sb, 7U);  \
-    Y.s2 += Y.s7; Y.sd = rotate(Y.sd ^ Y.s2, 16U); \
-    Y.s8 += Y.sd; Y.s7 = rotate(Y.s7 ^ Y.s8, 12U); \
-    Y.s2 += Y.s7; Y.sd = rotate(Y.sd ^ Y.s2, 8U);  \
-    Y.s8 += Y.sd; Y.s7 = rotate(Y.s7 ^ Y.s8, 7U);  \
-    Y.s3 += Y.s4; Y.se = rotate(Y.se ^ Y.s3, 16U); \
-    Y.s9 += Y.se; Y.s4 = rotate(Y.s4 ^ Y.s9, 12U); \
-    Y.s3 += Y.s4; Y.se = rotate(Y.se ^ Y.s3, 8U);  \
-    Y.s9 += Y.se; Y.s4 = rotate(Y.s4 ^ Y.s9, 7U);
-
-#define CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3) \
-    Y0 += Y1; Y3 = rotate(Y3 ^ Y0, (uint4)(16, 16, 16, 16)); \
-    Y2 += Y3; Y1 = rotate(Y1 ^ Y2, (uint4)(12, 12, 12, 12)); \
-    Y0 += Y1; Y3 = rotate(Y3 ^ Y0, (uint4)( 8,  8,  8,  8)); \
-    Y2 += Y3; Y1 = rotate(Y1 ^ Y2, (uint4)( 7,  7,  7,  7)); \
-    Y0 += Y1.yzwx; Y3 = rotate(Y3 ^ Y0.yzwx, (uint4)(16, 16, 16, 16)); \
-    Y2 += Y3.yzwx; Y1 = rotate(Y1 ^ Y2.yzwx, (uint4)(12, 12, 12, 12)); \
-    Y0 += Y1.yzwx; Y3 = rotate(Y3 ^ Y0.yzwx, (uint4)( 8,  8,  8,  8)); \
-    Y2 += Y3.yzwx; Y1 = rotate(Y1 ^ Y2.yzwx, (uint4)( 7,  7,  7,  7));
-
-uint16 neoscrypt_chacha(uint16 X) {
-    uint i;
-
-#if (CHACHA_SCALAR)
-
-    uint16 Y = X;
-
-#if (CHACHA_UNROLL_LEVEL == 1)
-
-    for(i = 0; i < 10; i++) {
-        CHACHA_CORE_SCALAR(Y);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 2)
-
-    for(i = 0; i < 5; i++) {
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 3)
-
-    for(i = 0; i < 4; i++) {
-        CHACHA_CORE_SCALAR(Y);
-        if(i == 3) break;
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 4)
-
-    for(i = 0; i < 3; i++) {
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-        if(i == 2) break;
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-     }
-
-#else
-
-    for(i = 0; i < 2; i++) {
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-        CHACHA_CORE_SCALAR(Y);
-    }
-
-#endif
-
-    return(X + Y);
-
-#else /* CHACHA_VECTOR */
-
-    uint4 Y0 = X.s0123, Y1 = X.s4567, Y2 = X.s89ab, Y3 = X.scdef;
-
-#if (CHACHA_UNROLL_LEVEL == 1)
-
-    for(i = 0; i < 10; i++) {
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 2)
-
-    for(i = 0; i < 5; i++) {
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 3)
-
-    for(i = 0; i < 4; i++) {
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        if(i == 3) break;
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#elif (CHACHA_UNROLL_LEVEL == 4)
-
-    for(i = 0; i < 3; i++) {
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        if(i == 2) break;
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-     }
-
-#else
-
-    for(i = 0; i < 2; i++) {
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-        CHACHA_CORE_VECTOR(Y0, Y1, Y2, Y3);
-    }
-
-#endif
-
-    return(X + (uint16)(Y0, Y1, Y2, Y3));
-
-#endif
+#define BLAKE_G_PRE(idx0,idx1, a, b, c, d, key) { \
+	a += key[idx0]; \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	a += key[idx1]; \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
 }
 
-
-/* For compatibility */
-#if (WORKGROUPSIZE) && !(WORKSIZE)
-#define WORKSIZE WORKGROUPSIZE
-#endif
-
-/* CodeXL only */
-#if !(WORKSIZE)
-#define WORKSIZE 128
-#endif
-
-
-/* FastKDF, a fast buffered key derivation function;
- * this algorithm makes extensive use of bytewise operations */
-uint neoscrypt_fastkdf_update(uint16 *XZ, __local uint16 *Lh) {
-
-    /* FastKDF needs 256 + 64 bytes for the password buffer,
-     * 256 + 32 bytes for the salt buffer, 64 + 64 + 32 bytes for BLAKE2s */
-
-    uint i, bufptr, passptr, offset;
-
-    /* Password buffer */
-    __local uint *Ai = (__local uint *) &Lh[0];
-    /* Salt buffer */
-    uint4 *Bq = (uint4 *) &XZ[0];
-    uint  *Bi = (uint  *) &XZ[0];
-    /* BLAKE2s temp buffer */
-    uint8 *T = (uint8 *)  &Bq[18];
-    uint4 *t = (uint4 *)  &Bq[18];
-    /* BLAKE2s memory space */
-    uint8 *M = (uint8 *)  &Bq[20];
-    uint  *m = (uint *)   &Bq[20];
-
-    /* The primary iteration */
-    for(i = 0, bufptr = 0; i < 32; i++) {
-
-        /* BLAKE2s state block */
-        uint16 S;
-
-        offset = bufptr & 0x03;
-        neoscrypt_copy32_upap(&M[0], &Bi[bufptr >> 2], offset);
-
-        M[1] = (uint8)(0, 0, 0, 0, 0, 0, 0, 0);
-
-        T[0] = blake2s_IV4[0];
-        S.lo = S.hi = T[0];
-
-        S.s0 ^= 0x01012020U;
-        S.sc ^= 64U;
-
-#if (BLAKE2S_COMPACT)
-
-        for(uint z = 0; z < 2; z++) {
-
-#pragma unroll
-            for(uint j = 0; j < 10; j++) {
-#if (BLAKE2S_SCALAR)
-                G(j,  0, S.s0, S.s4, S.s8, S.sc);
-                G(j,  2, S.s1, S.s5, S.s9, S.sd);
-                G(j,  4, S.s2, S.s6, S.sa, S.se);
-                G(j,  6, S.s3, S.s7, S.sb, S.sf);
-                G(j,  8, S.s0, S.s5, S.sa, S.sf);
-                G(j, 10, S.s1, S.s6, S.sb, S.sc);
-                G(j, 12, S.s2, S.s7, S.s8, S.sd);
-                G(j, 14, S.s3, S.s4, S.s9, S.se);
-#else
-                G1(j, S.s0123, S.s4567, S.s89ab, S.scdef);
-                G2(j, S.s0123, S.s5674, S.sab89, S.sfcde);
-#endif
-            }
-
-            if(z) break;
-
-            S.lo ^= S.hi ^ T[0];
-            S.s0 ^= 0x01012020U;
-            S.hi = T[0];
-            T[0] = S.lo;
-            S.sc ^= 128U;
-            S.se ^= 0xFFFFFFFFU;
-
-            passptr = bufptr - 80U;
-            neoscrypt_copy64_ulap(&M[0], &Ai[min(passptr, bufptr) >> 2], offset);
-
-        }
-
-#else
-
-#pragma unroll
-        for(uint j = 0; j < 10; j++) {
-#if (BLAKE2S_SCALAR)
-            G(j,  0, S.s0, S.s4, S.s8, S.sc);
-            G(j,  2, S.s1, S.s5, S.s9, S.sd);
-            G(j,  4, S.s2, S.s6, S.sa, S.se);
-            G(j,  6, S.s3, S.s7, S.sb, S.sf);
-            G(j,  8, S.s0, S.s5, S.sa, S.sf);
-            G(j, 10, S.s1, S.s6, S.sb, S.sc);
-            G(j, 12, S.s2, S.s7, S.s8, S.sd);
-            G(j, 14, S.s3, S.s4, S.s9, S.se);
-#else
-            G1(j, S.s0123, S.s4567, S.s89ab, S.scdef);
-            G2(j, S.s0123, S.s5674, S.sab89, S.sfcde);
-#endif
-        }
-
-        S.lo ^= S.hi ^ T[0];
-        S.s0 ^= 0x01012020U;
-        S.hi = T[0];
-        T[0] = S.lo;
-        S.sc ^= 128U;
-        S.se ^= 0xFFFFFFFFU;
-
-        passptr = bufptr - 80U;
-        neoscrypt_copy64_ulap(&M[0], &Ai[min(passptr, bufptr) >> 2], offset);
-
-#pragma unroll
-        for(uint j = 0; j < 10; j++) {
-#if (BLAKE2S_SCALAR)
-            G(j,  0, S.s0, S.s4, S.s8, S.sc);
-            G(j,  2, S.s1, S.s5, S.s9, S.sd);
-            G(j,  4, S.s2, S.s6, S.sa, S.se);
-            G(j,  6, S.s3, S.s7, S.sb, S.sf);
-            G(j,  8, S.s0, S.s5, S.sa, S.sf);
-            G(j, 10, S.s1, S.s6, S.sb, S.sc);
-            G(j, 12, S.s2, S.s7, S.s8, S.sd);
-            G(j, 14, S.s3, S.s4, S.s9, S.se);
-#else
-            G1(j, S.s0123, S.s4567, S.s89ab, S.scdef);
-            G2(j, S.s0123, S.s5674, S.sab89, S.sfcde);
-#endif
-        }
-
-#endif /* BLAKE2S_COMPACT */
-
-        T[0] ^= S.lo ^ S.hi;
-
-        /* Calculate the next buffer pointer */
-#if (FASTKDF_SCALAR)
-        uint8 temp;
-
-        temp.lo = t[0];
-        temp.hi = t[1];
-
-        bufptr  = temp.s0;
-        bufptr += rotate(temp.s0, 24U);
-        bufptr += rotate(temp.s0, 16U);
-        bufptr += rotate(temp.s0, 8U);
-        bufptr += temp.s1;
-        bufptr += rotate(temp.s1, 24U);
-        bufptr += rotate(temp.s1, 16U);
-        bufptr += rotate(temp.s1, 8U);
-        bufptr += temp.s2;
-        bufptr += rotate(temp.s2, 24U);
-        bufptr += rotate(temp.s2, 16U);
-        bufptr += rotate(temp.s2, 8U);
-        bufptr += temp.s3;
-        bufptr += rotate(temp.s3, 24U);
-        bufptr += rotate(temp.s3, 16U);
-        bufptr += rotate(temp.s3, 8U);
-        bufptr += temp.s4;
-        bufptr += rotate(temp.s4, 24U);
-        bufptr += rotate(temp.s4, 16U);
-        bufptr += rotate(temp.s4, 8U);
-        bufptr += temp.s5;
-        bufptr += rotate(temp.s5, 24U);
-        bufptr += rotate(temp.s5, 16U);
-        bufptr += rotate(temp.s5, 8U);
-        bufptr += temp.s6;
-        bufptr += rotate(temp.s6, 24U);
-        bufptr += rotate(temp.s6, 16U);
-        bufptr += rotate(temp.s6, 8U);
-        bufptr += temp.s7;
-        bufptr += rotate(temp.s7, 24U);
-        bufptr += rotate(temp.s7, 16U);
-        bufptr += rotate(temp.s7, 8U);
-
-        bufptr = convert_uchar(bufptr);
-#else
-        uint4 temp;
-        temp  = t[0];
-        temp += rotate(t[0], (uint4)(24, 24, 24, 24));
-        temp += rotate(t[0], (uint4)(16, 16, 16, 16));
-        temp += rotate(t[0], (uint4)( 8,  8,  8,  8));
-        temp += t[1];
-        temp += rotate(t[1], (uint4)(24, 24, 24, 24));
-        temp += rotate(t[1], (uint4)(16, 16, 16, 16));
-        temp += rotate(t[1], (uint4)( 8,  8,  8,  8));
-
-        bufptr = convert_uchar(temp.x + temp.y + temp.z + temp.w);
-#endif
-
-        /* Modify the salt buffer */
-        offset = bufptr & 0x03;
-        neoscrypt_xor32_apup(&Bi[bufptr >> 2], &T[0], offset);
-
-#if (AMD)
-        /* Head modified, 4-byte aligned copy to tail */
-        if(bufptr < 32U) {
-            neoscrypt_copy4(&Bi[(256 + bufptr) >> 2], &Bi[bufptr >> 2], 32U - bufptr + offset);
-            continue;
-        }
-
-        /* Tail modified, 4-byte aligned copy to head */
-        if(bufptr > 224U) {
-            neoscrypt_copy4(&Bi[0], &Bi[64], bufptr - 224U + (4U - offset));
-        }
-#else
-        /* Head modified, full copy to tail */
-        if(bufptr < 32U) {
-            Bq[16] = Bq[0];
-            Bq[17] = Bq[1];
-            continue;
-        }
-
-        /* Tail modified, full copy to head */
-        if(bufptr > 224U) {
-            Bq[0] = Bq[16];
-            Bq[1] = Bq[17];
-        }
-#endif
-
-    }
-
-    return(bufptr);
+#define BLAKE_G_PRE0(idx0,idx1, a, b, c, d, key) { \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
 }
 
-__attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
-__kernel void search(__global const uint4 *restrict input, __global uint *restrict output,
-  __global ulong16 *restrict globalcache, const uint target) {
-    uint i, j, k, bufptr, result;
+#define BLAKE_G_PRE1(idx0,idx1, a, b, c, d, key) { \
+	a += key[idx0]; \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
+}
 
-    uint glbid = get_global_id(0);
-    uint grpid = get_group_id(0);
-    __global uint16 *G = (__global uint16 *) &globalcache[mul24(grpid, (uint)(WORKSIZE << 8))];
+#define BLAKE_G_PRE2(idx0,idx1, a, b, c, d, key) { \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotateR(b^c, 12); \
+	a += key[idx1]; \
+	a += b; d = rotate((uint)(d^a), (uint)24); \
+	c += d; b = rotateR(b^c, 7); \
+}
 
-    uint lclid = glbid & (WORKSIZE - 1);
-    __local uint16 L[WORKSIZE << 2];
-    __local uint16 *Lh = (__local uint16 *) &L[lclid << 2];
+static inline
+void Blake2S_v2(uint *out, const uint*  inout, const  uint * TheKey)
+{
+	uint16 V;
+	uint8 tmpblock;
 
-    uint16 XZ[5];
-    uint4 *XZq = (uint4 *) &XZ[0];
-    uint  *XZi = (uint *)  &XZ[0];
+	V.hi = BLAKE2S_IV_Vec;
+	V.lo = BLAKE2S_IV_Vec;
+	V.lo.s0 ^= 0x01012020;
 
-    uint16 Y[4];
-    uint8 *Yo = (uint8 *) &Y[0];
+	// Copy input block for later
+	tmpblock = V.lo;
 
-    result = input[1].w;
+	V.hi.s4 ^= BLAKE2S_BLOCK_SIZE;
 
-    /* 1st FastKDF buffer initialisation */
-    const uint4 mod = (uint4)(input[4].x, input[4].y, input[4].z, glbid);
+	//	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+	BLAKE_G_PRE(0, 1, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE(2, 3, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE(4, 5, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE(6, 7, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(8, 9, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(10, 11, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE0(12, 13, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(14, 15, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3 },
+	BLAKE_G_PRE0(14, 10, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(4, 8, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(9, 15, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE2(13, 6, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE1(1, 12, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE(0, 2, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE2(11, 7, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE(5, 3, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4 },
+	BLAKE_G_PRE0(11, 8, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE2(12, 0, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE(5, 2, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE0(15, 13, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(10, 14, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE(3, 6, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE(7, 1, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE2(9, 4, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8 },
+	BLAKE_G_PRE1(7, 9, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE(3, 1, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(13, 12, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE0(11, 14, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE(2, 6, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE1(5, 10, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE(4, 0, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(15, 8, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13 },
+	BLAKE_G_PRE2(9, 0, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE(5, 7, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE(2, 4, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE0(10, 15, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE2(14, 1, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(11, 12, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(6, 8, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE1(3, 13, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9 },
+	BLAKE_G_PRE1(2, 12, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(6, 10, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE1(0, 11, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE2(8, 3, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE1(4, 13, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE(7, 5, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE0(15, 14, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE1(1, 9, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11 },
+	BLAKE_G_PRE2(12, 5, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(1, 15, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(14, 13, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE1(4, 10, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE(0, 7, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE(6, 3, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE2(9, 2, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE0(8, 11, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10 },
+	BLAKE_G_PRE0(13, 11, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(7, 14, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE2(12, 1, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE1(3, 9, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE(5, 0, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE2(15, 4, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE2(8, 6, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE(2, 10, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5 },
+	BLAKE_G_PRE1(6, 15, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE0(14, 9, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE2(11, 3, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE1(0, 8, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE2(12, 2, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE2(13, 7, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE(1, 4, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE2(10, 5, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
+	// { 10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0 },
+	BLAKE_G_PRE2(10, 2, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, TheKey);
+	BLAKE_G_PRE2(8, 4, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, TheKey);
+	BLAKE_G_PRE(7, 6, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, TheKey);
+	BLAKE_G_PRE(1, 5, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(15, 11, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, TheKey);
+	BLAKE_G_PRE0(9, 14, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, TheKey);
+	BLAKE_G_PRE1(3, 12, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, TheKey);
+	BLAKE_G_PRE2(13, 0, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, TheKey);
 
-    XZ[0] = (uint16)(input[0], input[1], input[2], input[3]);
-    XZ[1] = (uint16)(mod, input[0], input[1], input[2]);
-    XZ[2] = (uint16)(input[3], mod, input[0], input[1]);
-    XZ[3] = (uint16)(input[2], input[3], mod, input[0]);
-    XZq[16] = XZq[0];
-    XZq[17] = XZq[1];
+	V.lo ^= V.hi;
+	V.lo ^= tmpblock;
 
-    neoscrypt_copy128_pl(&Lh[0], &XZ[0]);
-    Lh[2] = (uint16)(input[3], mod, input[0], input[0]);
-    Lh[3] = (uint16)(input[1], input[2], input[3], mod);
+	V.hi = BLAKE2S_IV_Vec;
+	tmpblock = V.lo;
 
-#if (FASTKDF_COMPACT)
-    /* Mode 0 (stretching) and mode 1 (compressing) */
-    for(uint mode = 0; mode < 2; mode++) {
+	V.hi.s4 ^= 128;
+	V.hi.s6 = ~V.hi.s6;
 
-        /* X = KDF(password, salt) */
-        bufptr = neoscrypt_fastkdf_update(XZ, Lh);
+	// { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+	BLAKE_G_PRE(0, 1, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout);
+	BLAKE_G_PRE(2, 3, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout);
+	BLAKE_G_PRE(4, 5, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout);
+	BLAKE_G_PRE(6, 7, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout);
+	BLAKE_G_PRE(8, 9, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout);
+	BLAKE_G_PRE(10, 11, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout);
+	BLAKE_G_PRE(12, 13, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout);
+	BLAKE_G_PRE(14, 15, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout);
+	// { 14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3 },
+	BLAKE_G_PRE(14, 10, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout);
+	BLAKE_G_PRE(4, 8, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout);
+	BLAKE_G_PRE(9, 15, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout);
+	BLAKE_G_PRE(13, 6, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout);
+	BLAKE_G_PRE(1, 12, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout);
+	BLAKE_G_PRE(0, 2, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout);
+	BLAKE_G_PRE(11, 7, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout);
+	BLAKE_G_PRE(5, 3, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout);
+	// { 11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4 },
+	BLAKE_G_PRE(11, 8, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout);
+	BLAKE_G_PRE(12, 0, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout);
+	BLAKE_G_PRE(5, 2, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout);
+	BLAKE_G_PRE(15, 13, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout);
+	BLAKE_G_PRE(10, 14, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout);
+	BLAKE_G_PRE(3, 6, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout);
+	BLAKE_G_PRE(7, 1, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout);
+	BLAKE_G_PRE(9, 4, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout);
+	// { 7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8 },
+	BLAKE_G_PRE(7, 9, V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout);
+	BLAKE_G_PRE(3, 1, V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout);
+	BLAKE_G_PRE(13, 12, V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout);
+	BLAKE_G_PRE(11, 14, V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout);
+	BLAKE_G_PRE(2, 6, V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout);
+	BLAKE_G_PRE(5, 10, V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout);
+	BLAKE_G_PRE(4, 0, V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout);
+	BLAKE_G_PRE(15, 8, V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout);
 
-        if(mode) break;
-#else
-        bufptr = neoscrypt_fastkdf_update(XZ, Lh);
-#endif
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[9], inout[0]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[5], inout[7]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[2], inout[4]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[10], inout[15]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[14], inout[1]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[11], inout[12]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[6], inout[8]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[3], inout[13]);
 
-        /* FastKDF finish, mode 0 (stretching) */
-        uint it = (256 - bufptr + 31) >> 5;
-        neoscrypt_copy32_upap_it(&Yo[0], &XZi[bufptr >> 2], bufptr & 0x03, it);
-        neoscrypt_copy32_upap_it(&Yo[it], &XZi[(bufptr & 0x1FU) >> 2], bufptr & 0x03, 8U - it);
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[2], inout[12]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[6], inout[10]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[0], inout[11]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[8], inout[3]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[4], inout[13]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[7], inout[5]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[15], inout[14]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[1], inout[9]);
 
-        XZ[0] = Y[0] ^ Lh[0];
-        XZ[1] = Y[1] ^ Lh[1];
-        XZ[2] = Y[2] ^ (uint16)(input[3], mod, input[0], input[1]);
-        XZ[3] = Y[3] ^ (uint16)(input[2], input[3], mod, input[0]);
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[12], inout[5]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[1], inout[15]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[14], inout[13]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[4], inout[10]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[0], inout[7]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[6], inout[3]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[9], inout[2]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[8], inout[11]);
+	// 13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10,
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[13], inout[11]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[7], inout[14]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[12], inout[1]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[3], inout[9]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[5], inout[0]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[15], inout[4]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[8], inout[6]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[2], inout[10]);
+	// 6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5,
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[6], inout[15]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[14], inout[9]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[11], inout[3]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[0], inout[8]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[12], inout[2]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[13], inout[7]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[1], inout[4]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[10], inout[5]);
+	// 10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0,
+	BLAKE(V.lo.s0, V.lo.s4, V.hi.s0, V.hi.s4, inout[10], inout[2]);
+	BLAKE(V.lo.s1, V.lo.s5, V.hi.s1, V.hi.s5, inout[8], inout[4]);
+	BLAKE(V.lo.s2, V.lo.s6, V.hi.s2, V.hi.s6, inout[7], inout[6]);
+	BLAKE(V.lo.s3, V.lo.s7, V.hi.s3, V.hi.s7, inout[1], inout[5]);
+	BLAKE(V.lo.s0, V.lo.s5, V.hi.s2, V.hi.s7, inout[15], inout[11]);
+	BLAKE(V.lo.s1, V.lo.s6, V.hi.s3, V.hi.s4, inout[9], inout[14]);
+	BLAKE(V.lo.s2, V.lo.s7, V.hi.s0, V.hi.s5, inout[3], inout[12]);
+	BLAKE(V.lo.s3, V.lo.s4, V.hi.s1, V.hi.s6, inout[13], inout[0]);
 
-        /* blkcpy(Y, X/Z) */
-        neoscrypt_copy256(&Y[0], &XZ[0]);
+	V.lo ^= V.hi;
+	V.lo ^= tmpblock;
 
-        /* X = SMix(X) and Z = SMix(Z) */
-        for(i = 0; i < 2; i++) {
+	((uint8*)out)[0] = V.lo;
+}
 
-            for(j = 0; j < 128; j++) {
+#define SHL32(a,n) (amd_bitalign((a), bitselect(0U,     (a), (amd_bitalign(0U, ~0U, (n)))), (32U - (n))))
+#define SHR32(a,n) (amd_bitalign(0U,  bitselect((a),     0U, (amd_bitalign(0U, ~0U, (32U - (n))))), (n)))
+#define SHFRC32(a,b,n) (amd_bitalign((b), bitselect((a),     (b), (amd_bitalign(0U, ~0U, (32U - (n))))), (n)))
+#define SHFRC32S(a,b,n) (amd_bitalign((b), (a), (n)))
 
-                /* blkcpy(G, X) */
-                k = rotate(mad24(j, (uint)WORKSIZE, lclid), 2U);
-                G[k]     = XZ[0];
-                G[k + 1] = XZ[1];
-                G[k + 2] = XZ[2];
-                G[k + 3] = XZ[3];
+static inline
+void fastkdf256_v2(const uint thread, const uint nonce, __local uint* s_data,
+    __global uint *c_data, __global uint *input_init, __global uint8 *Input)
+{
+	const uint data18 = c_data[18];
+	const uint data20 = c_data[0];
+	uint input[16];
+	uint key[16] = { 0 };
+	uint qbuf, rbuf, bitbuf;
 
-                /* blkmix(X) */
-                if(i) {
-                    XZ[0] = neoscrypt_salsa(XZ[0] ^ XZ[3]);
-                    XZ[1] = neoscrypt_salsa(XZ[1] ^ XZ[0]);
-                    XZ[2] = neoscrypt_salsa(XZ[2] ^ XZ[1]);
-                    XZ[3] = neoscrypt_salsa(XZ[3] ^ XZ[2]);
-                } else {
-                    XZ[0] = neoscrypt_chacha(XZ[0] ^ XZ[3]);
-                    XZ[1] = neoscrypt_chacha(XZ[1] ^ XZ[0]);
-                    XZ[2] = neoscrypt_chacha(XZ[2] ^ XZ[1]);
-                    XZ[3] = neoscrypt_chacha(XZ[3] ^ XZ[2]);
-                }
-                neoscrypt_swap64(&XZ[2], &XZ[1]);
-
-            }
-
-            for(j = 0; j < 128; j++) {
-
-                /* integerify(X) mod N */
-                k = rotate(mad24((((uint *) XZ)[48] & 0x7F), (uint)WORKSIZE, lclid), 2U);
-
-                /* blkxor(X, G) */
-                XZ[0] ^= G[k];
-                XZ[1] ^= G[k + 1];
-                XZ[2] ^= G[k + 2];
-                XZ[3] ^= G[k + 3];
-
-                /* blkmix(X) */
-                if(i) {
-                    XZ[0] = neoscrypt_salsa(XZ[0] ^ XZ[3]);
-                    XZ[1] = neoscrypt_salsa(XZ[1] ^ XZ[0]);
-                    XZ[2] = neoscrypt_salsa(XZ[2] ^ XZ[1]);
-                    XZ[3] = neoscrypt_salsa(XZ[3] ^ XZ[2]);
-                } else {
-                    XZ[0] = neoscrypt_chacha(XZ[0] ^ XZ[3]);
-                    XZ[1] = neoscrypt_chacha(XZ[1] ^ XZ[0]);
-                    XZ[2] = neoscrypt_chacha(XZ[2] ^ XZ[1]);
-                    XZ[3] = neoscrypt_chacha(XZ[3] ^ XZ[2]);
-                }
-                neoscrypt_swap64(&XZ[2], &XZ[1]);
-
-            }
-
-            if(i) break;
-
-            /* Swap the buffers and repeat */
-            neoscrypt_swap256(&XZ[0], &Y[0]);
-
-        }
-
-        /* blkxor(X, Z) */
-        neoscrypt_xor256(&XZ[0], &Y[0]);
-
-        /* 2nd FastKDF buffer initialisation */
-        XZq[16] = XZq[0];
-        XZq[17] = XZq[1];
-
-#if (FASTKDF_COMPACT)
+	__local uint* B = (__local uint*)&s_data[get_local_id(0) * 64U];
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        ((__local uint16 *) (B))[i] = ((__global uint16 *) (c_data))[i];
     }
-#else
-    bufptr = neoscrypt_fastkdf_update(XZ, Lh);
-#endif
 
-    /* FastKDF finish, mode 1 (compressing); most significant uint only */
-    neoscrypt_xor4_upap(&result, &XZi[(bufptr >> 2) + 7], bufptr & 0x03);
+	B[19] = nonce;
+	B[39] = nonce;
+	B[59] = nonce;
+
+	{
+		uint bufidx = 0;
+		#pragma unroll
+		for (int x = 0; x < BLAKE2S_OUT_SIZE / 4; ++x)
+		{
+			uint bufhelper = (input_init[x] & 0x00ff00ff) + ((input_init[x] & 0xff00ff00) >> 8);
+			bufhelper = bufhelper + (bufhelper >> 16);
+			bufidx += bufhelper;
+		}
+		bufidx &= 0x000000ff;
+		qbuf = bufidx >> 2;
+		rbuf = bufidx & 3;
+		bitbuf = rbuf << 3;
+
+		uint temp[9];
+
+		uint shifted;
+		uint shift = 32U - bitbuf;
+		shifted = SHL32(input_init[0], bitbuf);
+		temp[0] = B[(0 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[0], input_init[1], shift);
+		temp[1] = B[(1 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[1], input_init[2], shift);
+		temp[2] = B[(2 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[2], input_init[3], shift);
+		temp[3] = B[(3 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[3], input_init[4], shift);
+		temp[4] = B[(4 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[4], input_init[5], shift);
+		temp[5] = B[(5 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[5], input_init[6], shift);
+		temp[6] = B[(6 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input_init[6], input_init[7], shift);
+		temp[7] = B[(7 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHR32(input_init[7], shift);
+		temp[8] = B[(8 + qbuf) & 0x3f] ^ shifted;
+
+		uint a = c_data[qbuf & 0x3f], b;
+
+		#pragma unroll
+		for (int k = 0; k<16; k += 2)
+		{
+			b = c_data[(qbuf + k + 1) & 0x3f];
+			input[k] = SHFRC32S(a, b, bitbuf);
+			a = c_data[(qbuf + k + 2) & 0x3f];
+			input[k + 1] = SHFRC32S(b, a, bitbuf);
+		}
+
+		const uint noncepos = 19 - qbuf % 20U;
+		if (noncepos <= 16U && qbuf < 60U)
+		{
+			if (noncepos)
+				input[noncepos - 1] = SHFRC32S(data18, nonce, bitbuf);
+			if (noncepos != 16U)
+				input[noncepos] = SHFRC32S(nonce, data20, bitbuf);
+		}
+
+		key[0] = SHFRC32S(temp[0], temp[1], bitbuf);
+		key[1] = SHFRC32S(temp[1], temp[2], bitbuf);
+		key[2] = SHFRC32S(temp[2], temp[3], bitbuf);
+		key[3] = SHFRC32S(temp[3], temp[4], bitbuf);
+		key[4] = SHFRC32S(temp[4], temp[5], bitbuf);
+		key[5] = SHFRC32S(temp[5], temp[6], bitbuf);
+		key[6] = SHFRC32S(temp[6], temp[7], bitbuf);
+		key[7] = SHFRC32S(temp[7], temp[8], bitbuf);
+
+        uint temp_out[8];
+		Blake2S_v2(temp_out, input, key);
+		#pragma unroll
+		for (int ii = 0; ii < 8; ii++) {
+			input[ii] = temp_out[ii];
+		}
+
+		#pragma unroll
+		for (int k = 0; k < 9; k++)
+			B[(k + qbuf) & 0x3f] = temp[k];
+	}
+
+	for (int i = 1; i < 31; i++)
+	{
+		uint bufidx = 0;
+		#pragma unroll
+		for (int x = 0; x < BLAKE2S_OUT_SIZE / 4; ++x)
+		{
+			uint bufhelper = (input[x] & 0x00ff00ff) + ((input[x] & 0xff00ff00) >> 8);
+			bufhelper = bufhelper + (bufhelper >> 16);
+			bufidx += bufhelper;
+		}
+		bufidx &= 0x000000ff;
+		qbuf = bufidx >> 2;
+		rbuf = bufidx & 3;
+		bitbuf = rbuf << 3;
+
+		uint temp[9];
+
+		uint shifted;
+		uint shift = 32U - bitbuf;
+		shifted = SHL32(input[0], bitbuf);
+		temp[0] = B[(0 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[0], input[1], shift);
+		temp[1] = B[(1 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[1], input[2], shift);
+		temp[2] = B[(2 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[2], input[3], shift);
+		temp[3] = B[(3 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[3], input[4], shift);
+		temp[4] = B[(4 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[4], input[5], shift);
+		temp[5] = B[(5 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[5], input[6], shift);
+		temp[6] = B[(6 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[6], input[7], shift);
+		temp[7] = B[(7 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHR32(input[7], shift);
+		temp[8] = B[(8 + qbuf) & 0x3f] ^ shifted;
+
+		uint a = c_data[qbuf & 0x3f], b;
+
+		#pragma unroll
+		for (int k = 0; k<16; k += 2)
+		{
+			b = c_data[(qbuf + k + 1) & 0x3f];
+			input[k] = SHFRC32S(a, b, bitbuf);
+			a = c_data[(qbuf + k + 2) & 0x3f];
+			input[k + 1] = SHFRC32S(b, a, bitbuf);
+		}
+
+		const uint noncepos = 19 - qbuf % 20U;
+		if (noncepos <= 16U && qbuf < 60U)
+		{
+			if (noncepos)
+				input[noncepos - 1] = SHFRC32S(data18, nonce, bitbuf);
+			if (noncepos != 16U)
+				input[noncepos] = SHFRC32S(nonce, data20, bitbuf);
+		}
+
+		key[0] = SHFRC32S(temp[0], temp[1], bitbuf);
+		key[1] = SHFRC32S(temp[1], temp[2], bitbuf);
+		key[2] = SHFRC32S(temp[2], temp[3], bitbuf);
+		key[3] = SHFRC32S(temp[3], temp[4], bitbuf);
+		key[4] = SHFRC32S(temp[4], temp[5], bitbuf);
+		key[5] = SHFRC32S(temp[5], temp[6], bitbuf);
+		key[6] = SHFRC32S(temp[6], temp[7], bitbuf);
+		key[7] = SHFRC32S(temp[7], temp[8], bitbuf);
+
+        uint temp_out[8];
+		Blake2S_v2(temp_out, input, key);
+		#pragma unroll
+		for (int ii = 0; ii < 8; ii++) {
+			input[ii] = temp_out[ii];
+		}
+
+		#pragma unroll
+		for (int k = 0; k < 9; k++)
+			B[(k + qbuf) & 0x3f] = temp[k];
+	}
+
+	{
+		uint bufidx = 0;
+		#pragma unroll
+		for (int x = 0; x < BLAKE2S_OUT_SIZE / 4; ++x)
+		{
+			uint bufhelper = (input[x] & 0x00ff00ff) + ((input[x] & 0xff00ff00) >> 8);
+			bufhelper = bufhelper + (bufhelper >> 16);
+			bufidx += bufhelper;
+		}
+		bufidx &= 0x000000ff;
+		qbuf = bufidx >> 2;
+		rbuf = bufidx & 3;
+		bitbuf = rbuf << 3;
+	}
+
+	uint8 output[8];
+	for (int i = 0; i<64; i++) {
+		const uint a = (qbuf + i) & 0x3f, b = (qbuf + i + 1) & 0x3f;
+		((uint*)output)[i] = SHFRC32S(B[a], B[b], bitbuf);
+	}
+
+	output[0] ^= ((uint8*)input)[0];
+	#pragma unroll
+	for (int i = 0; i<8; i++)
+		output[i] ^= ((__global uint8*)c_data)[i];
+
+	((uint*)output)[19] ^= nonce;
+	((uint*)output)[39] ^= nonce;
+	((uint*)output)[59] ^= nonce;;
+	#pragma unroll
+	for (int i = 0; i < 8; i++) {
+		((__global uint8 *)(Input + 8U * thread))[i] = output[i];
+	}
+}
+
+static inline
+uint fastkdf32_v3(uint thread, const uint nonce, uint* const salt, __local uint* const s_data, __global uint *c_data)
+{
+	const uint cdata7 = c_data[7];
+	const uint data18 = c_data[18];
+	const uint data20 = c_data[0];
+
+	__local uint* B0 = (__local uint*)&s_data[get_local_id(0) * 64U];
+	#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        ((__local uint16 *) (B0))[i] = ((uint16 *) (salt))[i];
+    }
+
+	uint input[BLAKE2S_BLOCK_SIZE / 4];
+	((uint16*)input)[0] = ((__global uint16*)c_data)[0];
+
+	uint key[BLAKE2S_BLOCK_SIZE / 4];
+	((uint8*)key)[0] = ((uint8*)salt)[0];
+	((uint4*)key)[2] = (uint4)(0, 0, 0, 0);
+	((uint4*)key)[3] = (uint4)(0, 0, 0, 0);
+
+	uint qbuf, rbuf, bitbuf;
+	uint temp[9];
+
+	#pragma nounroll
+	for (int i = 0; i < 31; i++)
+	{
+		Blake2S_v2(input, input, key);
+
+		uint bufidx = 0;
+		#pragma unroll
+		for (int x = 0; x < BLAKE2S_OUT_SIZE / 4; ++x)
+		{
+			uint bufhelper = (input[x] & 0x00ff00ff) + ((input[x] & 0xff00ff00) >> 8);
+			bufhelper = bufhelper + (bufhelper >> 16);
+			bufidx += bufhelper;
+		}
+		bufidx &= 0x000000ff;
+		qbuf = bufidx >> 2;
+		rbuf = bufidx & 3;
+		bitbuf = rbuf << 3;
+
+		uint shifted;
+		uint shift = 32U - bitbuf;
+		shifted = SHL32(input[0], bitbuf);
+		temp[0] = B0[(0 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[0], input[1], shift);
+		temp[1] = B0[(1 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[1], input[2], shift);
+		temp[2] = B0[(2 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[2], input[3], shift);
+		temp[3] = B0[(3 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[3], input[4], shift);
+		temp[4] = B0[(4 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[4], input[5], shift);
+		temp[5] = B0[(5 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[5], input[6], shift);
+		temp[6] = B0[(6 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHFRC32(input[6], input[7], shift);
+		temp[7] = B0[(7 + qbuf) & 0x3f] ^ shifted;
+		shifted = SHR32(input[7], shift);
+		temp[8] = B0[(8 + qbuf) & 0x3f] ^ shifted;
+
+		uint a = c_data[qbuf & 0x3f], b;
+		#pragma unroll
+		for (int k = 0; k<16; k += 2)
+		{
+			b = c_data[(qbuf + k + 1) & 0x3f];
+			input[k] = SHFRC32S(a, b, bitbuf);
+			a = c_data[(qbuf + k + 2) & 0x3f];
+			input[k + 1] = SHFRC32S(b, a, bitbuf);
+		}
+
+		const uint noncepos = 19U - qbuf % 20U;
+		if (noncepos <= 16U && qbuf < 60U)
+		{
+			if (noncepos != 0)
+				input[noncepos - 1] = SHFRC32S(data18, nonce, bitbuf);
+			if (noncepos != 16U)
+				input[noncepos] = SHFRC32S(nonce, data20, bitbuf);
+		}
+
+		key[0] = SHFRC32S(temp[0], temp[1], bitbuf);
+		key[1] = SHFRC32S(temp[1], temp[2], bitbuf);
+		key[2] = SHFRC32S(temp[2], temp[3], bitbuf);
+		key[3] = SHFRC32S(temp[3], temp[4], bitbuf);
+		key[4] = SHFRC32S(temp[4], temp[5], bitbuf);
+		key[5] = SHFRC32S(temp[5], temp[6], bitbuf);
+		key[6] = SHFRC32S(temp[6], temp[7], bitbuf);
+		key[7] = SHFRC32S(temp[7], temp[8], bitbuf);
+
+		#pragma unroll
+		for (int k = 0; k < 9; k++) {
+			B0[(k + qbuf) & 0x3f] = temp[k];
+		}
+	}
+
+	Blake2S_v2(input, input, key);
+
+	uint bufidx = 0;
+	#pragma unroll
+	for (int x = 0; x < BLAKE2S_OUT_SIZE / 4; ++x)
+	{
+		uint bufhelper = (input[x] & 0x00ff00ff) + ((input[x] & 0xff00ff00) >> 8);
+		bufhelper = bufhelper + (bufhelper >> 16);
+		bufidx += bufhelper;
+	}
+	bufidx &= 0x000000ff;
+	qbuf = bufidx >> 2;
+	rbuf = bufidx & 3;
+	bitbuf = rbuf << 3;
+
+	temp[7] = B0[(qbuf + 7) & 0x3f];
+	temp[8] = B0[(qbuf + 8) & 0x3f];
+
+	uint output;
+	output = SHFRC32S(temp[7], temp[8], bitbuf);
+	output ^= input[7] ^ cdata7;
+	return output;
+}
+
+#define NEO_TID ((get_local_size(0) >> 1) * get_local_id(1) + (get_local_id(0) & 3))
+
+#define WarpShuffle(result, a,  b,  c) \
+	shared_mem[32 * (get_local_id(0) >> 2) + NEO_TID] = a; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	result = shared_mem[32 * (get_local_id(0) >> 2) + (NEO_TID&~(c - 1)) + (b&(c - 1))]; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+
+#define WarpShuffle3(a1,  a2,  a3,  b1,  b2,  b3,  c) \
+	shared_mem[32 * (get_local_id(0) >> 2) + NEO_TID] = a1; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	a1 = shared_mem[32 * (get_local_id(0) >> 2) + (NEO_TID&~(c - 1)) + (b1&(c - 1))]; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	shared_mem[32 * (get_local_id(0) >> 2) + NEO_TID] = a2; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	a2 = shared_mem[32 * (get_local_id(0) >> 2) + (NEO_TID&~(c - 1)) + (b2&(c - 1))]; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	shared_mem[32 * (get_local_id(0) >> 2) + NEO_TID] = a3; \
+	barrier(CLK_LOCAL_MEM_FENCE); \
+	a3 = shared_mem[32 * (get_local_id(0) >> 2) + (NEO_TID&~(c - 1)) + (b3&(c - 1))]; \
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+
+#define SALSA(a,b,c,d) { \
+	t = rotate((uint)(a+d), (uint)( 7U)); b ^= t; \
+	t = rotate((uint)(b+a), (uint)( 9U)); c ^= t; \
+	t = rotate((uint)(c+b), (uint)(13U)); d ^= t; \
+	t = rotate((uint)(d+c), (uint)(18U)); a ^= t; \
+}
+
+#define SALSA_CORE(state) { \
+	uint t; \
+	SALSA(state.x, state.y, state.z, state.w); \
+	WarpShuffle3(state.y, state.z, state.w, (get_local_id(0) & 3) + 3, (get_local_id(0) & 3) + 2, (get_local_id(0) & 3) + 1,4); \
+	SALSA(state.x, state.w, state.z, state.y); \
+	WarpShuffle3(state.y, state.z, state.w, (get_local_id(0) & 3) + 1, (get_local_id(0) & 3) + 2, (get_local_id(0) & 3) + 3,4); \
+}
+
+uint4 salsa_small_scalar_rnd(const uint4 X, __local uint *shared_mem)
+{
+	uint4 state = X;
+
+	#pragma nounroll
+	for (int i = 0; i < 10; i++) {
+		SALSA_CORE(state);
+	}
+
+	return (X + state);
+}
+
+void inline neoscrypt_salsa(uint4 XV[4], __local uint *shared_mem)
+{
+	uint4 temp;
+
+	XV[0] = salsa_small_scalar_rnd(XV[0] ^ XV[3], shared_mem);
+	temp = salsa_small_scalar_rnd(XV[1] ^ XV[0], shared_mem);
+	XV[1] = salsa_small_scalar_rnd(XV[2] ^ temp, shared_mem);
+	XV[3] = salsa_small_scalar_rnd(XV[3] ^ XV[1], shared_mem);
+	XV[2] = temp;
+}
+
+#define CHACHA_STEP(a,b,c,d) { \
+	a += b; d = rotate((uint)(d^a), (uint)16); \
+	c += d; b = rotate((uint)(b^c), (uint)12); \
+	a += b; d = rotate((uint)(d^a), (uint)8); \
+	c += d; b = rotate((uint)(b^c), (uint)7); \
+}
+
+#define CHACHA_CORE_PARALLEL(state)	{ \
+	CHACHA_STEP(state.x, state.y, state.z, state.w); \
+	WarpShuffle3(state.y, state.z, state.w, (get_local_id(0) & 3) + 1, (get_local_id(0) & 3) + 2, (get_local_id(0) & 3) + 3,4); \
+	CHACHA_STEP(state.x, state.y, state.z, state.w); \
+	WarpShuffle3(state.y, state.z, state.w, (get_local_id(0) & 3) + 3, (get_local_id(0) & 3) + 2, (get_local_id(0) & 3) + 1,4); \
+}
+
+uint4 inline chacha_small_parallel_rnd(const uint4 X, __local uint *shared_mem)
+{
+	uint4 state = X;
+
+	#pragma nounroll
+	for (int i = 0; i < 10; i++) {
+		CHACHA_CORE_PARALLEL(state);
+	}
+	return (X + state);
+}
+
+void inline neoscrypt_chacha(uint4 XV[4], __local uint *shared_mem)
+{
+	uint4 temp;
+
+	XV[0] = chacha_small_parallel_rnd(XV[0] ^ XV[3], shared_mem);
+	temp = chacha_small_parallel_rnd(XV[1] ^ XV[0], shared_mem);
+	XV[1] = chacha_small_parallel_rnd(XV[2] ^ temp, shared_mem);
+	XV[3] = chacha_small_parallel_rnd(XV[3] ^ XV[1], shared_mem);
+	XV[2] = temp;
+}
+
+#define SHIFT 128U
+#define TPB 32
+#define TPB2 64
+
+__attribute__((reqd_work_group_size(64, 1, 1)))
+__kernel void neoscrypt_gpu_hash_start(__global uint *c_data, __global uint *input_init, __global uint8 *Input)
+{
+	__local uint s_data[64 * TPB2];
+
+	const uint thread = get_global_id(0) - get_global_offset(0);
+	const uint nonce = get_global_id(0);
+	const uint ZNonce = nonce; //freaking morons !!!
+
+	fastkdf256_v2(thread, ZNonce, s_data, c_data, input_init, Input);
+}
+
+__attribute__((reqd_work_group_size(8, 8, 1)))
+__kernel void neoscrypt_gpu_hash_salsa1(__global uint8 *W, __global uint8 *Tr2, __global uint8 *Input)
+{
+	const uint thread =  (get_local_size(1) * (get_group_id(0) * 2 + (get_local_id(0) >> 2)) + get_local_id(1));
+	const uint shift = SHIFT * 8U * (thread & (MAX_GLOBAL_THREADS - 1));
+	const uint shiftTr = 8U * thread;
+
+	__local uint shared_mem[64];
+
+	uint4 Z[4];
+	for (int i = 0; i < 4; i++)
+	{
+		Z[i].x = *(((__global uint*)&(Input + shiftTr)[i * 2]) + ((0 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3));
+		Z[i].y = *(((__global uint*)&(Input + shiftTr)[i * 2]) + ((1 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3));
+		Z[i].z = *(((__global uint*)&(Input + shiftTr)[i * 2]) + ((2 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3));
+		Z[i].w = *(((__global uint*)&(Input + shiftTr)[i * 2]) + ((3 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3));
+	}
+
+	#pragma nounroll
+	for (int i = 0; i < 128; i++)
+	{
+		uint offset = MAX_GLOBAL_THREADS * i * 8U + 8U * (thread & (MAX_GLOBAL_THREADS - 1)); //shift + i * 8U;
+		for (int j = 0; j < 4; j++)
+			((__global uint4*)(W + offset))[j * 4 + (get_local_id(0) & 3)] = Z[j];
+		neoscrypt_salsa(Z, shared_mem);
+	}
+
+	#pragma nounroll
+	for (int t = 0; t < 128; t++)
+	{
+		uint offset;
+		WarpShuffle(offset, Z[3].x, 0, 4);
+		offset = MAX_GLOBAL_THREADS * (offset & 0x7F) * 8U + 8U * (thread & (MAX_GLOBAL_THREADS - 1)); //shift + (offset & 0x7F) * 8U;
+		for (int j = 0; j < 4; j++)
+			Z[j] ^= ((__global uint4*)(W + offset))[j * 4 + (get_local_id(0) & 3)];
+		neoscrypt_salsa(Z, shared_mem);
+	}
+	#pragma unroll
+	for (int i = 0; i < 4; i++)
+	{
+		*((global uint*)&(Tr2 + shiftTr)[i * 2] + ((0 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3)) = Z[i].x;
+		*((global uint*)&(Tr2 + shiftTr)[i * 2] + ((1 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3)) = Z[i].y;
+		*((global uint*)&(Tr2 + shiftTr)[i * 2] + ((2 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3)) = Z[i].z;
+		*((global uint*)&(Tr2 + shiftTr)[i * 2] + ((3 + (get_local_id(0) & 3)) & 3) * 4 + (get_local_id(0) & 3)) = Z[i].w;
+	}
+}
+
+__attribute__((reqd_work_group_size(8, 8, 1)))
+__kernel void neoscrypt_gpu_hash_chacha1(__global uint8 *W, __global uint8 *Tr, __global uint8 *Input)
+{
+	const uint thread = (get_local_size(1) * (get_group_id(0) * 2 + (get_local_id(0) >> 2)) + get_local_id(1));
+	const uint shift = SHIFT * 8U * (thread & (MAX_GLOBAL_THREADS - 1));
+	const uint shiftTr = 8U * thread;
+
+	__local uint shared_mem[64];
+
+	uint4 X[4];
+	for (int i = 0; i < 4; i++)
+	{
+		X[i].x = *((__global uint*)&(Input + shiftTr)[i * 2] + 0 * 4 + (get_local_id(0) & 3));
+		X[i].y = *((__global uint*)&(Input + shiftTr)[i * 2] + 1 * 4 + (get_local_id(0) & 3));
+		X[i].z = *((__global uint*)&(Input + shiftTr)[i * 2] + 2 * 4 + (get_local_id(0) & 3));
+		X[i].w = *((__global uint*)&(Input + shiftTr)[i * 2] + 3 * 4 + (get_local_id(0) & 3));
+	}
+
+	#pragma nounroll
+	for (int i = 0; i < 128; i++)
+	{
+		uint offset = MAX_GLOBAL_THREADS * i * 8U + 8U * (thread & (MAX_GLOBAL_THREADS - 1)); //shift + i * 8U;
+		for (int j = 0; j < 4; j++)
+			((__global uint4*)(W + offset))[j * 4 + (get_local_id(0) & 3)] = X[j];
+		neoscrypt_chacha(X, shared_mem);
+	}
+
+	#pragma nounroll
+	for (int t = 0; t < 128; t++)
+	{
+		uint offset;
+		WarpShuffle(offset, X[3].x, 0, 4);
+		offset = MAX_GLOBAL_THREADS * (offset & 0x7F) * 8U + 8U * (thread & (MAX_GLOBAL_THREADS - 1)); //shift + (offset & 0x7F) * 8U;
+		for (int j = 0; j < 4; j++)
+			X[j] ^= ((__global uint4*)(W + offset))[j * 4 + (get_local_id(0) & 3)];
+		neoscrypt_chacha(X, shared_mem);
+	}
+
+	#pragma unroll
+	for (int i = 0; i < 4; i++)
+	{
+		*((__global uint*)&(Tr + shiftTr)[i * 2] + 0 * 4 + (get_local_id(0) & 3)) = X[i].x;
+		*((__global uint*)&(Tr + shiftTr)[i * 2] + 1 * 4 + (get_local_id(0) & 3)) = X[i].y;
+		*((__global uint*)&(Tr + shiftTr)[i * 2] + 2 * 4 + (get_local_id(0) & 3)) = X[i].z;
+		*((__global uint*)&(Tr + shiftTr)[i * 2] + 3 * 4 + (get_local_id(0) & 3)) = X[i].w;
+	}
+}
+
+__attribute__((reqd_work_group_size(64, 1, 1)))
+__kernel void neoscrypt_gpu_hash_ending(__global uint *c_data, __global uint8 *Tr, __global uint8 *Tr2, __global uint *output, const uint target)
+{
+	__local uint s_data[64 * TPB2];
+
+	const uint thread = get_global_id(0) - get_global_offset(0);
+	const uint shiftTr = thread * 8U;
+	const uint nonce = get_global_id(0);
+	const uint ZNonce = nonce;
+
+	uint8 Z[8];
+	#pragma unroll
+	for (int i = 0; i<8; i++)
+		Z[i] = (Tr2 + shiftTr)[i] ^ (Tr + shiftTr)[i];
+
+	uint outbuf = fastkdf32_v3(thread, ZNonce, (uint*)Z, s_data, c_data);
 
 #define NEOSCRYPT_FOUND (0xFF)
 #ifdef cl_khr_global_int32_base_atomics
@@ -969,7 +896,5 @@ __kernel void search(__global const uint4 *restrict input, __global uint *restri
     #define SETFOUND(nonce) output[output[NEOSCRYPT_FOUND]++] = nonce
 #endif
 
-    if(result <= target) SETFOUND(glbid);
-
-    return;
+    if(outbuf <= target) SETFOUND(nonce);
 }
