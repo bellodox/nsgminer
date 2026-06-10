@@ -23,7 +23,7 @@ READ EXECUTIVE SUMMARY BELOW FOR FIRST TIME USERS!
 
 Everything you probably want, condensed:
 	build-essential autoconf automake libtool pkg-config libcurl4-gnutls-dev
-	uthash-dev libncursesw5-dev
+	uthash-dev libncursesw5-dev libjansson-dev
 
 Dependencies:
 	autoconf             http://www.gnu.org/software/autoconf/
@@ -34,11 +34,13 @@ Dependencies:
 
 	libcurl4-gnutls-dev  http://curl.haxx.se/libcurl/
 
+	libjansson-dev       http://www.digip.org/jansson/ (required; included as submodule)
+
 Optional Dependencies:
 	Text-User-Interface (TUI): curses dev library; any one of:
-	  libncurses5-dev    http://www.gnu.org/software/ncurses/ (Linux and Mac)
-	  libncursesw5-dev       ^ same
-	  libpdcurses        http://pdcurses.sourceforge.net/ (Linux/Mac/Windows)
+	  libncurses5-dev    http://www.gnu.org/software/ncurses/ (Linux)
+	  libncursesw5-dev   http://www.gnu.org/software/ncurses/ (Linux)
+	  libpdcurses        http://pdcurses.sourceforge.net/ (Windows)
 
 	Multiple FPGA autodetection: any one of:
 	  sysfs              (builtin to most Linux kernels, just mount on /sys)
@@ -56,6 +58,8 @@ Optional Dependencies:
 
 NSGminer specific configuration options:
         --disable-neoscrypt     Build without support for NeoScrypt (default enabled)
+        --enable-neoscrypt-xaya Build with support for NeoScrypt-Xaya (default disabled)
+                              Implies --enable-neoscrypt
         --enable-scrypt         Build with support for Scrypt (default disabled)
         --enable-sha256d        Build with support for SHA-256d (default disabled)
         --enable-cpumining      Build with support for CPU mining (default disabled)

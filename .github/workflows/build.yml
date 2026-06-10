@@ -2,9 +2,9 @@ name: Build and Test
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ test ]
   pull_request:
-    branches: [ dev ]
+    branches: [ test ]
   workflow_dispatch:
 
 env:
@@ -17,6 +17,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Install dependencies
       run: |
@@ -28,7 +30,7 @@ jobs:
           pkg-config \
           libcurl4-gnutls-dev \
           libjansson-dev \
-          libncurses-dev \
+          libncursesw5-dev \
           uthash-dev \
           yasm
 
@@ -44,6 +46,10 @@ jobs:
     - name: Build
       run: |
         make -j$(nproc)
+
+    - name: Test build
+      run: |
+        make check || true
 
     - name: Verify binary
       run: |
@@ -69,6 +75,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Install dependencies
       run: |
@@ -80,7 +88,7 @@ jobs:
           pkg-config \
           libcurl4-gnutls-dev \
           libjansson-dev \
-          libncurses-dev \
+          libncursesw5-dev \
           uthash-dev \
           yasm \
           ocl-icd-opencl-dev \
@@ -98,6 +106,10 @@ jobs:
     - name: Build
       run: |
         make -j$(nproc)
+
+    - name: Test build
+      run: |
+        make check || true
 
     - name: Verify binary
       run: |
@@ -117,6 +129,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Install dependencies
       run: |
@@ -128,7 +142,7 @@ jobs:
           pkg-config \
           libcurl4-gnutls-dev \
           libjansson-dev \
-          libncurses-dev \
+          libncursesw5-dev \
           uthash-dev \
           yasm \
           libusb-1.0-0-dev \
@@ -146,6 +160,10 @@ jobs:
     - name: Build
       run: |
         make -j$(nproc)
+
+    - name: Test build
+      run: |
+        make check || true
 
     - name: Verify binary
       run: |
@@ -165,6 +183,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Setup MSYS2
       uses: msys2/setup-msys2@v2
@@ -198,6 +218,11 @@ jobs:
       run: |
         make -j$NUMBER_OF_PROCESSORS
 
+    - name: Test build
+      shell: msys2 {0}
+      run: |
+        make check || true
+
     - name: Verify binary
       shell: msys2 {0}
       run: |
@@ -216,6 +241,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Install dependencies
       run: |
@@ -239,6 +266,10 @@ jobs:
     - name: Build
       run: |
         make -j$(sysctl -n hw.ncpu)
+
+    - name: Test build
+      run: |
+        make check || true
 
     - name: Verify binary
       run: |
