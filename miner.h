@@ -848,11 +848,8 @@ extern struct cgpu_info gpus[MAX_GPUDEVICES];
 extern int gpu_threads;
 
 extern bool opt_neoscrypt;
-extern bool opt_neoscrypt_xaya;
 extern bool opt_scrypt;
 extern bool opt_sha256d;
-extern bool opt_noadl;
-extern bool opt_nonvml;
 
 extern double total_secs;
 extern int mining_threads;
@@ -880,7 +877,7 @@ extern int opt_hysteresis;
 extern int opt_fail_pause;
 extern int opt_log_interval;
 extern unsigned long long global_hashrate;
-extern char current_fullhash[68];
+char current_fullhash[68];
 extern uint64_t best_diff;
 extern struct timeval block_timeval;
 

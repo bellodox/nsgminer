@@ -594,14 +594,9 @@ modminer_prepare_next_work(struct modminer_fpga_state*state, struct work*work)
 {
 	char *midstate = state->next_work_cmd + 2;
 	char *taildata = midstate + 32;
-#if defined(USE_SHA256D) || defined(USE_SCRYPT)
 	if (!(memcmp(midstate, work->midstate, 32) || memcmp(taildata, work->data + 64, 12)))
 		return false;
 	memcpy(midstate, work->midstate, 32);
-#else
-	/* ModMiner is a SHA256 ASIC - midstate is not available in NeoScrypt-only builds */
-	memset(midstate, 0, 32);
-#endif
 	memcpy(taildata, work->data + 64, 12);
 	return true;
 }
@@ -699,15 +694,13 @@ modminer_process_results(struct thr_info*thr)
 				applog(LOG_DEBUG, "%s %u.%u: Nonce with H not zero  : %02x%02x%02x%02x",
 				       modminer->api->name, modminer->device_id, fpgaid,
 				       NONCE_CHARS(nonce));
-	#if defined(USE_SHA256D) || defined(USE_SCRYPT)
 				mutex_lock(&stats_lock);
 				++total_diff1;
 				++modminer->diff1;
 				++work->pool->diff1;
 				++hw_errors;
-				mutex_unlock(&stats_lock);
-	#endif
 				++modminer->hw_errors;
+				mutex_unlock(&stats_lock);
 				++state->bad_share_counter;
 				++immediate_bad_nonces;
 			}
