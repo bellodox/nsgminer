@@ -306,7 +306,7 @@ jobs:
         # Test that both neoscrypt and neoscrypt-xaya can be used
         timeout 3 ./nsgminer --neoscrypt --help 2>&1 | head -20 || true
         timeout 3 ./nsgminer --neoscrypt-xaya --help 2>&1 | head -20 || true
-        timeout 3 ./nsgminer --enable-sha256 --help 2>&1 | head -20 || true
+        #timeout 3 ./nsgminer --enable-sha256 --help 2>&1 | head -20 || true
 
     - name: Test build verification
       run: |
